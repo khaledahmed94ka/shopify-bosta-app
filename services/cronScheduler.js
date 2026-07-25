@@ -81,7 +81,7 @@ async function executeDailySync(isManualTrigger = false) {
         tags: tagsToAdd,
         existingTags: order.shopifyTags || [],
         trackingNumber: trackingNum,
-        fulfillmentId: order.fulfillmentId,
+        fulfillmentIds: order.fulfillmentIds || [],
         codAmount: order.codAmount
       });
 
@@ -108,7 +108,7 @@ async function executeDailySync(isManualTrigger = false) {
     moneyCollectedCount: moneyCollectedCount,
     totalMoneyCollected: totalMoneyCollectedAmount,
     status: 'SUCCESS',
-    details: `Sync completed. Checked ${totalChecked} live orders. Synced Bosta tracking numbers & links to Shopify Admin.`
+    details: `Sync completed. Checked ${totalChecked} live orders. Updated fulfillment carrier from Other to Bosta with tracking link.`
   });
 
   console.log(`[Daily Sync Engine] Sync complete. Result:`, logEntry.details);

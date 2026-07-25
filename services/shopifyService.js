@@ -4,6 +4,7 @@ const db = require('./db');
 /**
  * Shopify Admin API Service Engine
  * Attaches Bosta Tracking Number & Clickable Tracking Link directly to Shopify Fulfillments, Metafields, Notes, and Tags.
+ * Updates "Other: XXXXXXXXX" to "Bosta: XXXXXXXXX" with live tracking URL in Shopify Admin backend.
  */
 
 /**
@@ -27,24 +28,20 @@ async function fetchLiveShopifyOrders() {
 
     return response.orders.map(rawOrder => {
       let trackingNumber = null;
-      let existingFulfillmentId = null;
+      const fulfillmentIds = [];
       
-      // 1. From fulfillments
+      // Extract all fulfillment IDs & tracking numbers
       if (rawOrder.fulfillments && rawOrder.fulfillments.length > 0) {
         for (const ful of rawOrder.fulfillments) {
-          existingFulfillmentId = ful.id;
-          if (ful.tracking_number) {
-            trackingNumber = ful.tracking_number;
-            break;
-          }
-          if (ful.tracking_numbers && ful.tracking_numbers.length > 0) {
-            trackingNumber = ful.tracking_numbers[0];
-            break;
+          if (ful.id) fulfillmentIds.push(ful.id);
+          if (!trackingNumber) {
+            if (ful.tracking_number) trackingNumber = ful.tracking_number;
+            else if (ful.tracking_numbers && ful.tracking_numbers.length > 0) trackingNumber = ful.tracking_numbers[0];
           }
         }
       }
 
-      // 2. From Tags
+      // From Tags
       if (!trackingNumber && rawOrder.tags) {
         const tags = rawOrder.tags.split(',').map(t => t.trim());
         for (const tag of tags) {
@@ -56,7 +53,7 @@ async function fetchLiveShopifyOrders() {
         }
       }
 
-      // 3. From Order Note
+      // From Order Note
       if (!trackingNumber && rawOrder.note) {
         const noteMatch = rawOrder.note.match(/(?:tracking|bosta|awb)[:\s]*(\d{8,14})/i);
         if (noteMatch) trackingNumber = noteMatch[1];
@@ -70,7 +67,7 @@ async function fetchLiveShopifyOrders() {
         numericId: rawOrder.id,
         orderNumber: rawOrder.name || `#${rawOrder.order_number}`,
         cleanOrderNumber: cleanOrderNum,
-        fulfillmentId: existingFulfillmentId,
+        fulfillmentIds: fulfillmentIds,
         customerName: rawOrder.customer ? `${rawOrder.customer.first_name || ''} ${rawOrder.customer.last_name || ''}`.trim() : 'Customer',
         city: rawOrder.shipping_address ? rawOrder.shipping_address.city : '',
         trackingNumber: trackingNumber || cleanOrderNum,
@@ -92,7 +89,7 @@ async function fetchLiveShopifyOrders() {
 
 /**
  * Updates Shopify Order with Bosta Tracking Number & Tracking URL
- * Writes to Fulfillments, Metafields, Notes, and Tags.
+ * Updates "Other: 4499207557" to "Bosta: 4499207557" with live link.
  */
 async function updateShopifyOrder(shopifyNumericOrderId, updates) {
   const settings = db.getSettings();
@@ -131,7 +128,7 @@ async function updateShopifyOrder(shopifyNumericOrderId, updates) {
     try {
       const cleanDomain = storeDomain.replace(/^https?:\/\//, '').replace(/\/$/, '');
       
-      // 1. Update Order Tags, Note, and Financial Status via REST API
+      // 1. Update Order Tags, Note, and Financial Status
       const payload = {
         order: {
           id: cleanNumericId,
@@ -159,10 +156,11 @@ async function updateShopifyOrder(shopifyNumericOrderId, updates) {
         await makeShopifyRequest(cleanDomain, `/admin/api/2026-07/orders/${cleanNumericId}/metafields.json`, 'POST', accessToken, metafieldPayload);
       } catch (mErr) {}
 
-      // 3. Attach Tracking Number & URL to Shopify Fulfillment
-      if (trackingNum) {
-        try {
-          if (updates.fulfillmentId) {
+      // 3. Update all existing fulfillments to set Carrier to "Bosta" with tracking number and URL
+      const fulfillmentIds = updates.fulfillmentIds || (updates.fulfillmentId ? [updates.fulfillmentId] : []);
+      if (fulfillmentIds.length > 0 && trackingNum) {
+        for (const fulId of fulfillmentIds) {
+          try {
             const updateTrackingPayload = {
               fulfillment: {
                 notify_customer: false,
@@ -173,21 +171,11 @@ async function updateShopifyOrder(shopifyNumericOrderId, updates) {
                 }
               }
             };
-            await makeShopifyRequest(cleanDomain, `/admin/api/2026-07/fulfillments/${updates.fulfillmentId}/update_tracking.json`, 'POST', accessToken, updateTrackingPayload);
-          } else {
-            const createFulfillmentPayload = {
-              fulfillment: {
-                tracking_number: trackingNum,
-                tracking_company: 'Bosta',
-                tracking_urls: [trackingUrl],
-                notify_customer: false
-              }
-            };
-            await makeShopifyRequest(cleanDomain, `/admin/api/2026-07/orders/${cleanNumericId}/fulfillments.json`, 'POST', accessToken, createFulfillmentPayload);
+            await makeShopifyRequest(cleanDomain, `/admin/api/2026-07/fulfillments/${fulId}/update_tracking.json`, 'POST', accessToken, updateTrackingPayload);
+            console.log(`[Shopify Tracking Sync] Updated fulfillment ${fulId} on Order ${cleanNumericId} to Bosta: ${trackingNum}`);
+          } catch (fulErr) {
+            console.warn(`[Shopify Fulfillment Note] Fulfillment ${fulId} update note: ${fulErr.message}`);
           }
-          console.log(`[Shopify Tracking Sync] Attached Bosta Tracking ${trackingNum} and URL to Order ${cleanNumericId}`);
-        } catch (fulErr) {
-          console.warn(`[Shopify Fulfillment Note] Fulfillment tracking update note: ${fulErr.message}`);
         }
       }
     } catch (err) {
@@ -200,7 +188,7 @@ async function updateShopifyOrder(shopifyNumericOrderId, updates) {
     trackingNumber: trackingNum,
     trackingUrl: trackingUrl,
     tags: formattedTagsString,
-    message: `Order ${cleanNumericId} synced with Bosta tracking number ${trackingNum} and link.`
+    message: `Order ${cleanNumericId} updated to Bosta carrier with tracking link.`
   };
 }
 
