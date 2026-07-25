@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Shopify Bosta Integration & COD Tracker</title>
+  <!-- Google Fonts: Inter & Outfit -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon">
+          <i class="fa-solid fa-truck-fast"></i>
+        </div>
+        <div class="brand-text">
+          <span class="brand-name">Bosta Sync</span>
+          <span class="brand-sub">Shopify App Engine</span>
+        </div>
+      </div>
+
+      <nav class="nav-menu">
+        <button class="nav-item active" data-tab="dashboard">
+          <i class="fa-solid fa-chart-pie"></i>
+          <span>Dashboard</span>
+        </button>
+        <button class="nav-item" data-tab="tracking">
+          <i class="fa-solid fa-magnifying-glass-location"></i>
+          <span>Track Order</span>
+        </button>
+        <button class="nav-item" data-tab="orders">
+          <i class="fa-solid fa-boxes-packing"></i>
+          <span>Orders & COD</span>
+        </button>
+        <button class="nav-item" data-tab="sync-logs">
+          <i class="fa-solid fa-clock-rotate-left"></i>
+          <span>Daily Sync Logs</span>
+        </button>
+        <button class="nav-item" data-tab="settings">
+          <i class="fa-solid fa-sliders"></i>
+          <span>Settings</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="status-indicator">
+          <span class="dot pulse"></span>
+          <div class="status-info">
+            <span class="status-title">Daily Sync Engine</span>
+            <span class="status-desc" id="sidebarSyncStatus">Scheduled (00:00 Daily)</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+      <!-- Top Navbar -->
+      <header class="top-header">
+        <div class="header-left">
+          <h1 id="pageTitle">Dashboard & COD Analytics</h1>
+          <p id="pageSubtitle">Real-time Bosta API sync & daily cash collection verification</p>
+        </div>
+
+        <div class="header-actions">
+          <button class="btn btn-outline" id="btnRefreshData">
+            <i class="fa-solid fa-rotate"></i> Refresh
+          </button>
+          <button class="btn btn-primary" id="btnRunSync">
+            <i class="fa-solid fa-bolt-lightning"></i> Run Sync Now
+          </button>
+        </div>
+      </header>
+
+      <!-- Toast Notification Container -->
+      <div id="toastContainer" class="toast-container"></div>
+
+      <!-- TAB 1: DASHBOARD -->
+      <section id="tab-dashboard" class="tab-pane active">
+        <!-- KPI Metrics Grid -->
+        <div class="kpi-grid">
+          <div class="kpi-card gradient-blue">
+            <div class="kpi-icon">
+              <i class="fa-solid fa-cubes"></i>
+            </div>
+            <div class="kpi-content">
+              <span class="kpi-title">Total Active Orders</span>
+              <h2 class="kpi-value" id="kpiTotalOrders">0</h2>
+              <span class="kpi-badge"><i class="fa-brands fa-shopify"></i> Shopify Synced</span>
+            </div>
+          </div>
+
+          <div class="kpi-card gradient-green">
+            <div class="kpi-icon">
+              <i class="fa-solid fa-sack-dollar"></i>
+            </div>
+            <div class="kpi-content">
+              <span class="kpi-title">COD Cash Collected</span>
+              <h2 class="kpi-value" id="kpiCollectedAmount">0 EGP</h2>
+              <span class="kpi-badge success" id="kpiCollectionRate">0% Collection Rate</span>
+            </div>
+          </div>
+
+          <div class="kpi-card gradient-orange">
+            <div class="kpi-icon">
+              <i class="fa-solid fa-hand-holding-dollar"></i>
+            </div>
+            <div class="kpi-content">
+              <span class="kpi-title">Pending COD Collection</span>
+              <h2 class="kpi-value" id="kpiPendingAmount">0 EGP</h2>
+              <span class="kpi-badge warning" id="kpiPendingCount">0 Orders Delivered</span>
+            </div>
+          </div>
+
+          <div class="kpi-card gradient-purple">
+            <div class="kpi-icon">
+              <i class="fa-solid fa-truck-ramp-box"></i>
+            </div>
+            <div class="kpi-content">
+              <span class="kpi-title">In-Transit Shipments</span>
+              <h2 class="kpi-value" id="kpiInTransitCount">0</h2>
+              <span class="kpi-badge info">Bosta Couriers Out</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Dashboard Charts & Quick Track Row -->
+        <div class="dash-row">
+          <!-- Quick Tracking Card -->
+          <div class="card card-hero">
+            <div class="card-header">
+              <div>
+                <h3><i class="fa-solid fa-magnifying-glass"></i> Instant Tracking Lookup</h3>
+                <p>Query Bosta API by Tracking Number or Airwaybill (AWB)</p>
+              </div>
+            </div>
+            <div class="card-body">
+              <form id="dashTrackForm" class="search-form">
+                <div class="input-group">
+                  <i class="fa-solid fa-barcode input-icon"></i>
+                  <input type="text" id="dashTrackingInput" placeholder="Enter Bosta Tracking Number (e.g. 104928374)" required>
+                  <button type="submit" class="btn btn-accent">
+                    <i class="fa-solid fa-search"></i> Check Bosta Status
+                  </button>
+                </div>
+              </form>
+              <div class="sample-chips">
+                <span>Try sample tracking numbers:</span>
+                <button class="chip" data-track="104928374">104928374 (Delivered & Paid)</button>
+                <button class="chip" data-track="204859102">204859102 (Out for Delivery)</button>
+                <button class="chip" data-track="309482711">309482711 (COD Pending)</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Recent Activity & Quick Table -->
+        <div class="dash-row">
+          <div class="card">
+            <div class="card-header space-between">
+              <h3><i class="fa-solid fa-list-check"></i> Orders Needing Attention</h3>
+              <button class="btn btn-sm btn-ghost" id="btnGoToOrders">View All Orders <i class="fa-solid fa-arrow-right"></i></button>
+            </div>
+            <div class="card-body padding-0">
+              <div class="table-responsive">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Shopify Order</th>
+                      <th>Customer</th>
+                      <th>Bosta Tracking</th>
+                      <th>Bosta Status</th>
+                      <th>COD Amount</th>
+                      <th>Money Collected</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="dashOrdersTableBody">
+                    <!-- Populated via JS -->
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 2: TRACK ORDER TOOL -->
+      <section id="tab-tracking" class="tab-pane">
+        <div class="card">
+          <div class="card-header">
+            <h3><i class="fa-solid fa-truck-moving"></i> Bosta Shipment Tracker</h3>
+            <p>Direct Bosta API lookup & delivery state inspection</p>
+          </div>
+          <div class="card-body">
+            <form id="mainTrackForm" class="search-form">
+              <div class="input-group">
+                <i class="fa-solid fa-truck-fast input-icon"></i>
+                <input type="text" id="mainTrackingInput" placeholder="Enter Bosta Tracking Number / AWB" required>
+                <button type="submit" class="btn btn-primary">
+                  <i class="fa-solid fa-magnifying-glass"></i> Track Shipment
+                </button>
+              </div>
+            </form>
+
+            <div id="trackingResultArea" class="tracking-result-container hidden">
+              <!-- Rendered via JS -->
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 3: ORDERS & COD TABLE -->
+      <section id="tab-orders" class="tab-pane">
+        <div class="card">
+          <div class="card-header space-between">
+            <div>
+              <h3><i class="fa-solid fa-boxes-stacked"></i> Shopify Orders & Bosta Tracking</h3>
+              <p>Filter by money collection and delivery status</p>
+            </div>
+            <div class="filter-pills">
+              <button class="pill active" data-filter="all">All Orders</button>
+              <button class="pill" data-filter="pending_collection">Pending COD</button>
+              <button class="pill" data-filter="collected">Money Collected</button>
+              <button class="pill" data-filter="in_transit">In-Transit</button>
+              <button class="pill" data-filter="delivered">Delivered</button>
+            </div>
+          </div>
+
+          <div class="card-body padding-0">
+            <div class="table-responsive">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Order #</th>
+                    <th>Customer & City</th>
+                    <th>Tracking Number</th>
+                    <th>Bosta Status</th>
+                    <th>COD Amount</th>
+                    <th>Cash Collected</th>
+                    <th>Shopify Tags</th>
+                    <th>Last Checked</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="ordersTableBody">
+                  <!-- Populated via JS -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 4: DAILY SYNC LOGS -->
+      <section id="tab-sync-logs" class="tab-pane">
+        <div class="card">
+          <div class="card-header space-between">
+            <div>
+              <h3><i class="fa-solid fa-clock-rotate-left"></i> Daily Automated Sync Audit Logs</h3>
+              <p>History of daily automated checks for money collection and delivery verification</p>
+            </div>
+            <button class="btn btn-sm btn-outline" id="btnRefreshLogs">
+              <i class="fa-solid fa-rotate"></i> Refresh Logs
+            </button>
+          </div>
+          <div class="card-body padding-0">
+            <div class="table-responsive">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Log ID</th>
+                    <th>Timestamp</th>
+                    <th>Trigger Type</th>
+                    <th>Checked</th>
+                    <th>Updated</th>
+                    <th>COD Collected Count</th>
+                    <th>Total Cash Verified</th>
+                    <th>Status & Report</th>
+                  </tr>
+                </thead>
+                <tbody id="logsTableBody">
+                  <!-- Populated via JS -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 5: SETTINGS -->
+      <section id="tab-settings" class="tab-pane">
+        <div class="settings-grid">
+          <!-- Bosta API Settings -->
+          <div class="card">
+            <div class="card-header">
+              <h3><i class="fa-solid fa-key"></i> Bosta API Credentials</h3>
+              <p>Configure API Key and environment mode</p>
+            </div>
+            <div class="card-body">
+              <form id="settingsForm">
+                <div class="form-group">
+                  <label for="bostaApiKey">Bosta API Key / Authorization Token</label>
+                  <input type="text" id="bostaApiKey" class="form-control" placeholder="Enter Bosta API Key">
+                  <small class="form-text">Obtain from your Bosta Merchant Dashboard -> API Settings.</small>
+                </div>
+
+                <div class="form-group">
+                  <label for="bostaEnvironment">API Environment</label>
+                  <select id="bostaEnvironment" class="form-control">
+                    <option value="sandbox">Sandbox / Staging (stg-api.bosta.co)</option>
+                    <option value="live">Production / Live (api.bosta.co)</option>
+                  </select>
+                </div>
+
+                <hr class="divider">
+
+                <h3><i class="fa-solid fa-store"></i> Shopify Store Credentials</h3>
+                
+                <div class="form-group">
+                  <label for="shopifyStoreDomain">Shopify Store Domain</label>
+                  <input type="text" id="shopifyStoreDomain" class="form-control" placeholder="example.myshopify.com">
+                </div>
+
+                <div class="form-group">
+                  <label for="shopifyAccessToken">Shopify Admin API Access Token</label>
+                  <input type="password" id="shopifyAccessToken" class="form-control" placeholder="shpat_xxxxxxxxxxxxxxxx">
+                </div>
+
+                <hr class="divider">
+
+                <h3><i class="fa-solid fa-calendar-day"></i> Daily Background Sync Schedule</h3>
+
+                <div class="form-row">
+                  <div class="form-group col">
+                    <label for="dailySyncHour">Daily Run Hour (00 - 23)</label>
+                    <select id="dailySyncHour" class="form-control">
+                      <option value="00">00:00 (Midnight)</option>
+                      <option value="01">01:00 AM</option>
+                      <option value="06">06:00 AM</option>
+                      <option value="12">12:00 PM (Noon)</option>
+                      <option value="18">06:00 PM</option>
+                      <option value="22">10:00 PM</option>
+                    </select>
+                  </div>
+                  <div class="form-group col">
+                    <label for="dailySyncMinute">Minute</label>
+                    <input type="text" id="dailySyncMinute" class="form-control" value="00" readonly>
+                  </div>
+                </div>
+
+                <div class="form-group checkbox-group">
+                  <label class="switch">
+                    <input type="checkbox" id="autoTagOrders" checked>
+                    <span class="slider round"></span>
+                  </label>
+                  <span>Auto-add Shopify tags (e.g. <code>Bosta: Delivered</code>, <code>Bosta: Cash Collected</code>)</span>
+                </div>
+
+                <div class="form-group checkbox-group">
+                  <label class="switch">
+                    <input type="checkbox" id="autoMarkPaid" checked>
+                    <span class="slider round"></span>
+                  </label>
+                  <span>Auto-mark Shopify orders as <strong>Paid</strong> upon Bosta COD collection verification</span>
+                </div>
+
+                <div class="form-group checkbox-group">
+                  <label class="switch">
+                    <input type="checkbox" id="autoFulfillDelivered" checked>
+                    <span class="slider round"></span>
+                  </label>
+                  <span>Auto-fulfill Shopify orders when Bosta status reaches <strong>Delivered</strong></span>
+                </div>
+
+                <div class="form-actions">
+                  <button type="submit" class="btn btn-primary btn-lg">
+                    <i class="fa-solid fa-floppy-disk"></i> Save Settings & Schedule
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Tracking Details Modal -->
+  <div id="trackingModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-truck"></i> Shipment Timeline & Detail</h3>
+        <button class="modal-close" id="closeModal">&times;</button>
+      </div>
+      <div class="modal-body" id="modalBodyContent">
+        <!-- Rendered via JS -->
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

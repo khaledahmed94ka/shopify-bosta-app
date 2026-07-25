@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: shopify-bosta-integration
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: BOSTA_API_KEY
+        sync: false
+      - key: BOSTA_ENV
+        value: live
+      - key: SHOPIFY_STORE_DOMAIN
+        sync: false
+      - key: SHOPIFY_ACCESS_TOKEN
+        sync: false
+      - key: CRON_SCHEDULE_HOUR
+        value: "00"
