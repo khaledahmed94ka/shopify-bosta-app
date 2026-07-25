@@ -22,21 +22,28 @@ const activeSchedule = cronScheduler.initScheduler();
 
 /**
  * GET /api/dashboard
- * Summary statistics and metric counters for the dashboard UI
+ * Summary statistics and metric counters for live Shopify store
  */
-app.get('/api/dashboard', (req, res) => {
-  const orders = db.getOrders();
+app.get('/api/dashboard', async (req, res) => {
+  let orders = db.getOrders();
+  try {
+    const liveOrders = await shopifyService.fetchLiveShopifyOrders();
+    if (liveOrders && liveOrders.length > 0) {
+      orders = liveOrders;
+    }
+  } catch (e) {}
+
   const settings = db.getSettings();
   const logs = db.getLogs();
 
   const totalOrders = orders.length;
-  const deliveredOrders = orders.filter(o => o.bostaStatus === 'DELIVERED');
-  const cashCollectedOrders = orders.filter(o => o.isMoneyCollected);
-  const pendingCodOrders = orders.filter(o => o.bostaStatus === 'DELIVERED' && !o.isMoneyCollected);
-  const inTransitOrders = orders.filter(o => o.bostaStatus === 'OUT_FOR_DELIVERY' || o.bostaStatus === 'PACKAGE_RECEIVED');
+  const deliveredOrders = orders.filter(o => o.bostaStatus === 'DELIVERED' || o.shopifyFulfillmentStatus === 'fulfilled');
+  const cashCollectedOrders = orders.filter(o => o.isMoneyCollected || o.shopifyPaymentStatus === 'paid');
+  const pendingCodOrders = orders.filter(o => (o.bostaStatus === 'DELIVERED' || o.shopifyFulfillmentStatus === 'fulfilled') && !o.isMoneyCollected && o.shopifyPaymentStatus !== 'paid');
+  const inTransitOrders = orders.filter(o => o.shopifyFulfillmentStatus !== 'fulfilled' && o.bostaStatus !== 'DELIVERED');
 
   const totalCodValue = orders.reduce((sum, o) => sum + (o.codAmount || 0), 0);
-  const totalCollectedAmount = cashCollectedOrders.reduce((sum, o) => sum + (o.moneyCollectedAmount || 0), 0);
+  const totalCollectedAmount = cashCollectedOrders.reduce((sum, o) => sum + (o.moneyCollectedAmount || o.codAmount || 0), 0);
   const totalPendingAmount = pendingCodOrders.reduce((sum, o) => sum + (o.codAmount || 0), 0);
 
   res.json({
@@ -53,8 +60,8 @@ app.get('/api/dashboard', (req, res) => {
       collectionRate: totalCodValue > 0 ? Math.round((totalCollectedAmount / totalCodValue) * 100) : 0
     },
     settings: {
-      bostaEnvironment: settings.bostaEnvironment,
-      dailySyncSchedule: `${settings.dailySyncHour}:${settings.dailySyncMinute}`,
+      bostaEnvironment: process.env.BOSTA_ENV || settings.bostaEnvironment,
+      dailySyncSchedule: `${process.env.CRON_SCHEDULE_HOUR || settings.dailySyncHour}:00`,
       lastSyncTime: settings.lastSyncTime
     },
     recentLogs: logs.slice(0, 5)
@@ -63,30 +70,37 @@ app.get('/api/dashboard', (req, res) => {
 
 /**
  * GET /api/orders
- * Returns list of orders with optional query filter
+ * Returns list of live Shopify orders with optional query filter
  */
-app.get('/api/orders', (req, res) => {
-  const { status, filter, query } = req.query;
+app.get('/api/orders', async (req, res) => {
+  const { filter, query } = req.query;
   let orders = db.getOrders();
+
+  try {
+    const liveOrders = await shopifyService.fetchLiveShopifyOrders();
+    if (liveOrders && liveOrders.length > 0) {
+      orders = liveOrders;
+    }
+  } catch (e) {}
 
   if (query) {
     const q = query.toLowerCase();
     orders = orders.filter(o =>
-      o.orderNumber.toLowerCase().includes(q) ||
-      o.trackingNumber.toLowerCase().includes(q) ||
-      o.customerName.toLowerCase().includes(q) ||
-      o.city.toLowerCase().includes(q)
+      (o.orderNumber && o.orderNumber.toLowerCase().includes(q)) ||
+      (o.trackingNumber && String(o.trackingNumber).toLowerCase().includes(q)) ||
+      (o.customerName && o.customerName.toLowerCase().includes(q)) ||
+      (o.city && o.city.toLowerCase().includes(q))
     );
   }
 
   if (filter === 'collected') {
-    orders = orders.filter(o => o.isMoneyCollected);
+    orders = orders.filter(o => o.isMoneyCollected || o.shopifyPaymentStatus === 'paid');
   } else if (filter === 'pending_collection') {
-    orders = orders.filter(o => o.bostaStatus === 'DELIVERED' && !o.isMoneyCollected);
+    orders = orders.filter(o => (o.bostaStatus === 'DELIVERED' || o.shopifyFulfillmentStatus === 'fulfilled') && !o.isMoneyCollected && o.shopifyPaymentStatus !== 'paid');
   } else if (filter === 'in_transit') {
-    orders = orders.filter(o => o.bostaStatus === 'OUT_FOR_DELIVERY' || o.bostaStatus === 'PACKAGE_RECEIVED');
+    orders = orders.filter(o => o.shopifyFulfillmentStatus !== 'fulfilled');
   } else if (filter === 'delivered') {
-    orders = orders.filter(o => o.bostaStatus === 'DELIVERED');
+    orders = orders.filter(o => o.bostaStatus === 'DELIVERED' || o.shopifyFulfillmentStatus === 'fulfilled');
   }
 
   res.json({
@@ -152,12 +166,26 @@ app.get('/api/logs', (req, res) => {
  */
 app.get('/api/settings', (req, res) => {
   const settings = db.getSettings();
-  res.json({ success: true, settings, activeSchedule });
+  res.json({
+    success: true,
+    settings: {
+      bostaApiKey: process.env.BOSTA_API_KEY ? '••••••••' + process.env.BOSTA_API_KEY.slice(-4) : settings.bostaApiKey,
+      bostaEnvironment: process.env.BOSTA_ENV || settings.bostaEnvironment,
+      shopifyStoreDomain: process.env.SHOPIFY_STORE_DOMAIN || settings.shopifyStoreDomain,
+      shopifyAccessToken: process.env.SHOPIFY_ACCESS_TOKEN ? '••••••••' + process.env.SHOPIFY_ACCESS_TOKEN.slice(-4) : settings.shopifyAccessToken,
+      dailySyncHour: process.env.CRON_SCHEDULE_HOUR || settings.dailySyncHour,
+      dailySyncMinute: '00',
+      autoTagOrders: true,
+      autoMarkPaid: true,
+      autoFulfillDelivered: true
+    },
+    activeSchedule
+  });
 });
 
 /**
  * POST /api/settings
- * Update app settings & re-schedule daily cron job
+ * Update app settings
  */
 app.post('/api/settings', (req, res) => {
   try {
