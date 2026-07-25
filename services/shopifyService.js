@@ -60,13 +60,12 @@ async function fetchLiveShopifyOrders() {
         if (noteMatch) trackingNumber = noteMatch[1];
       }
 
-      // 4. Default fallback to Order Number (e.g. "PET10284" or "10284")
       const cleanOrderNum = String(rawOrder.order_number || rawOrder.name || '').replace('#', '');
 
       return {
-        id: `SHP-${rawOrder.order_number}`,
+        id: String(rawOrder.id), // Exact 13-digit numeric Shopify Order ID (e.g., "6838653845575")
         shopifyOrderId: `gid://shopify/Order/${rawOrder.id}`,
-        rawId: rawOrder.id,
+        numericId: rawOrder.id,
         orderNumber: rawOrder.name || `#${rawOrder.order_number}`,
         cleanOrderNumber: cleanOrderNum,
         customerName: rawOrder.customer ? `${rawOrder.customer.first_name || ''} ${rawOrder.customer.last_name || ''}`.trim() : 'Customer',
@@ -94,18 +93,21 @@ async function fetchLiveShopifyOrders() {
  * Updates Shopify Order directly in Shopify Admin via REST API
  * Writes clean Tags (Bosta Delivered, Bosta Cash Collected), Metafields, Notes, and Payment Status.
  */
-async function updateShopifyOrder(orderId, updates) {
+async function updateShopifyOrder(shopifyNumericOrderId, updates) {
   const settings = db.getSettings();
   const storeDomain = process.env.SHOPIFY_STORE_DOMAIN || settings.shopifyStoreDomain;
   const accessToken = process.env.SHOPIFY_ACCESS_TOKEN || settings.shopifyAccessToken;
 
-  const rawShopifyId = String(orderId).replace('gid://shopify/Order/', '').replace('SHP-', '');
+  // Extract pure 13-digit Shopify Order ID
+  const cleanNumericId = String(shopifyNumericOrderId)
+    .replace('gid://shopify/Order/', '')
+    .replace('SHP-', '')
+    .trim();
 
   // Prepare clean tags list
   const incomingTags = updates.tags || [];
   const existingTags = updates.existingTags || [];
 
-  // Combine tags and format cleanly
   const combinedSet = new Set([...existingTags, ...incomingTags]);
   
   if (updates.fulfillmentStatus === 'fulfilled' || updates.isDelivered) {
@@ -137,7 +139,7 @@ async function updateShopifyOrder(orderId, updates) {
       
       const payload = {
         order: {
-          id: rawShopifyId,
+          id: cleanNumericId,
           tags: formattedTagsString,
           note: noteComment,
           metafields: metafields
@@ -148,17 +150,18 @@ async function updateShopifyOrder(orderId, updates) {
         payload.order.financial_status = 'paid';
       }
 
-      await makeShopifyRequest(cleanDomain, `/admin/api/2026-07/orders/${rawShopifyId}.json`, 'PUT', accessToken, payload);
-      console.log(`[Shopify Live API] Updated Order ${rawShopifyId} with Tags: "${formattedTagsString}"`);
+      const res = await makeShopifyRequest(cleanDomain, `/admin/api/2026-07/orders/${cleanNumericId}.json`, 'PUT', accessToken, payload);
+      console.log(`[Shopify Live API] Updated Order ID ${cleanNumericId} with Tags: "${formattedTagsString}"`);
+      return { success: true, tags: formattedTagsString, order: res };
     } catch (err) {
-      console.warn(`[Shopify API Error] Could not update order ${rawShopifyId}: ${err.message}`);
+      console.warn(`[Shopify API Error] Could not update order ID ${cleanNumericId}: ${err.message}`);
     }
   }
 
   return {
     success: true,
     tags: formattedTagsString,
-    message: `Order ${rawShopifyId} tags updated to "${formattedTagsString}" in Shopify Admin.`
+    message: `Order ${cleanNumericId} tags updated to "${formattedTagsString}"`
   };
 }
 

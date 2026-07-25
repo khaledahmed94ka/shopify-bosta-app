@@ -69,8 +69,10 @@ async function executeDailySync(isManualTrigger = false) {
 
       totalUpdated++;
 
-      // Update Shopify Admin directly with clean tags and metafields
-      const shopifyResult = await shopifyService.updateShopifyOrder(order.rawId || order.id || order.shopifyOrderId, {
+      // Pass exact 13-digit numeric Shopify Order ID
+      const targetNumericId = order.id || order.numericId || order.shopifyOrderId;
+
+      const shopifyResult = await shopifyService.updateShopifyOrder(targetNumericId, {
         bostaStatusName: bostaData.statusName || (isDelivered ? 'Delivered' : 'In Transit'),
         fulfillmentStatus: isDelivered ? 'fulfilled' : 'unfulfilled',
         paymentStatus: isPaid ? 'paid' : 'pending',
@@ -84,7 +86,7 @@ async function executeDailySync(isManualTrigger = false) {
 
       updatedOrdersList.push({
         orderNumber: order.orderNumber,
-        trackingNumber: order.trackingNumber || order.cleanOrderNumber,
+        shopifyId: targetNumericId,
         tagsApplied: shopifyResult.tags,
         isDelivered: isDelivered,
         isPaid: isPaid
