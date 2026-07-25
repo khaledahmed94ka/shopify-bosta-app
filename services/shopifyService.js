@@ -124,16 +124,6 @@ async function updateShopifyOrder(shopifyNumericOrderId, updates) {
 
   const formattedTagsString = Array.from(combinedSet).filter(Boolean).join(', ');
 
-  // Prepare Metafields
-  const metafields = [
-    { namespace: 'bosta', key: 'tracking_number', value: trackingNum, type: 'single_line_text_field' },
-    { namespace: 'bosta', key: 'tracking_url', value: trackingUrl, type: 'url' },
-    { namespace: 'bosta', key: 'delivery_status', value: String(updates.bostaStatusName || 'Delivered'), type: 'single_line_text_field' },
-    { namespace: 'bosta', key: 'is_delivered', value: (updates.fulfillmentStatus === 'fulfilled' || updates.isDelivered) ? 'true' : 'false', type: 'boolean' },
-    { namespace: 'bosta', key: 'cod_amount', value: `${updates.codAmount || 0} EGP`, type: 'single_line_text_field' },
-    { namespace: 'bosta', key: 'money_collected', value: (updates.paymentStatus === 'paid' || updates.isMoneyCollected) ? 'true' : 'false', type: 'boolean' }
-  ];
-
   // Order Note with Clickable Tracking Link
   const noteComment = `[Bosta Tracking Sync] Tracking Number: ${trackingNum}\nBosta Tracking Link: ${trackingUrl}\nStatus: ${updates.bostaStatusName || 'Delivered'}\nCOD Amount: ${updates.codAmount || 0} EGP\nLast Checked: ${new Date().toLocaleString()}`;
 
@@ -141,13 +131,12 @@ async function updateShopifyOrder(shopifyNumericOrderId, updates) {
     try {
       const cleanDomain = storeDomain.replace(/^https?:\/\//, '').replace(/\/$/, '');
       
-      // 1. Update Order Tags, Notes, Metafields, and Financial Status
+      // 1. Update Order Tags, Note, and Financial Status via REST API
       const payload = {
         order: {
           id: cleanNumericId,
           tags: formattedTagsString,
-          note: noteComment,
-          metafields: metafields
+          note: noteComment
         }
       };
 
@@ -157,11 +146,23 @@ async function updateShopifyOrder(shopifyNumericOrderId, updates) {
 
       await makeShopifyRequest(cleanDomain, `/admin/api/2026-07/orders/${cleanNumericId}.json`, 'PUT', accessToken, payload);
 
-      // 2. Attach Tracking Number & URL to Shopify Fulfillment
+      // 2. Write Order Metafield for Tracking URL
+      try {
+        const metafieldPayload = {
+          metafield: {
+            namespace: 'bosta',
+            key: 'tracking_url',
+            value: trackingUrl,
+            type: 'url'
+          }
+        };
+        await makeShopifyRequest(cleanDomain, `/admin/api/2026-07/orders/${cleanNumericId}/metafields.json`, 'POST', accessToken, metafieldPayload);
+      } catch (mErr) {}
+
+      // 3. Attach Tracking Number & URL to Shopify Fulfillment
       if (trackingNum) {
         try {
           if (updates.fulfillmentId) {
-            // Update existing fulfillment tracking info
             const updateTrackingPayload = {
               fulfillment: {
                 notify_customer: false,
@@ -174,10 +175,8 @@ async function updateShopifyOrder(shopifyNumericOrderId, updates) {
             };
             await makeShopifyRequest(cleanDomain, `/admin/api/2026-07/fulfillments/${updates.fulfillmentId}/update_tracking.json`, 'POST', accessToken, updateTrackingPayload);
           } else {
-            // Create new fulfillment with Bosta tracking info
             const createFulfillmentPayload = {
               fulfillment: {
-                location_id: null,
                 tracking_number: trackingNum,
                 tracking_company: 'Bosta',
                 tracking_urls: [trackingUrl],
