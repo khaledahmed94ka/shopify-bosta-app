@@ -41,11 +41,12 @@ async function executeDailySync(isManualTrigger = false) {
 
     try {
       let bostaData = { isDelivered: false, isMoneyCollected: false, statusName: 'Package Received' };
-      
+      const trackingNum = order.trackingNumber || order.cleanOrderNumber;
+
       // Attempt Bosta lookup if tracking number present
-      if (order.trackingNumber) {
+      if (trackingNum) {
         try {
-          bostaData = await bostaService.getDeliveryByTracking(order.trackingNumber);
+          bostaData = await bostaService.getDeliveryByTracking(trackingNum);
         } catch (bErr) {
           console.warn(`[Bosta Lookup Note] Order ${order.orderNumber} Bosta query: ${bErr.message}`);
         }
@@ -69,7 +70,6 @@ async function executeDailySync(isManualTrigger = false) {
 
       totalUpdated++;
 
-      // Pass exact 13-digit numeric Shopify Order ID
       const targetNumericId = order.id || order.numericId || order.shopifyOrderId;
 
       const shopifyResult = await shopifyService.updateShopifyOrder(targetNumericId, {
@@ -80,13 +80,16 @@ async function executeDailySync(isManualTrigger = false) {
         isMoneyCollected: isPaid,
         tags: tagsToAdd,
         existingTags: order.shopifyTags || [],
-        trackingNumber: order.trackingNumber || order.cleanOrderNumber,
+        trackingNumber: trackingNum,
+        fulfillmentId: order.fulfillmentId,
         codAmount: order.codAmount
       });
 
       updatedOrdersList.push({
         orderNumber: order.orderNumber,
         shopifyId: targetNumericId,
+        trackingNumber: trackingNum,
+        trackingUrl: shopifyResult.trackingUrl,
         tagsApplied: shopifyResult.tags,
         isDelivered: isDelivered,
         isPaid: isPaid
@@ -105,7 +108,7 @@ async function executeDailySync(isManualTrigger = false) {
     moneyCollectedCount: moneyCollectedCount,
     totalMoneyCollected: totalMoneyCollectedAmount,
     status: 'SUCCESS',
-    details: `Sync completed. Checked ${totalChecked} live orders. Applied tags (Bosta Delivered / Bosta Cash Collected) to ${totalUpdated} orders.`
+    details: `Sync completed. Checked ${totalChecked} live orders. Synced Bosta tracking numbers & links to Shopify Admin.`
   });
 
   console.log(`[Daily Sync Engine] Sync complete. Result:`, logEntry.details);
