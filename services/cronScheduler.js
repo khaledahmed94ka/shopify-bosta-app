@@ -6,7 +6,7 @@ const shopifyService = require('./shopifyService');
 let cronTask = null;
 
 /**
- * Executes a full synchronization check across all open/pending orders.
+ * Executes a full synchronization check across all open/pending orders directly from Shopify Admin API.
  */
 async function executeDailySync(isManualTrigger = false) {
   console.log(`\n======================================================`);
@@ -15,20 +15,38 @@ async function executeDailySync(isManualTrigger = false) {
   console.log(`======================================================\n`);
 
   const settings = db.getSettings();
-  const orders = db.getOrders();
   
+  // 1. Fetch live orders from Shopify API if store credentials are configured
+  let ordersToCheck = [];
+  try {
+    const liveShopifyOrders = await shopifyService.fetchLiveShopifyOrders();
+    if (liveShopifyOrders && liveShopifyOrders.length > 0) {
+      console.log(`[Daily Sync Engine] Fetched ${liveShopifyOrders.length} live orders directly from Shopify store.`);
+      ordersToCheck = liveShopifyOrders;
+    } else {
+      console.log(`[Daily Sync Engine] Using database orders pool (${db.getOrders().length} orders).`);
+      ordersToCheck = db.getOrders();
+    }
+  } catch (err) {
+    console.warn(`[Daily Sync Engine] Could not fetch live Shopify orders: ${err.message}. Using stored orders.`);
+    ordersToCheck = db.getOrders();
+  }
+
   let totalChecked = 0;
   let totalUpdated = 0;
   let moneyCollectedCount = 0;
   let totalMoneyCollectedAmount = 0;
   const updatedOrdersList = [];
 
-  for (const order of orders) {
-    if (!order.trackingNumber) continue;
+  for (const order of ordersToCheck) {
+    if (!order.trackingNumber) {
+      console.log(`Skipping order ${order.orderNumber}: No Bosta tracking number found on order.`);
+      continue;
+    }
     totalChecked++;
 
     try {
-      // 1. Fetch current status & cash collection state from Bosta API
+      // 2. Fetch current status & cash collection state from Bosta API
       const bostaData = await bostaService.getDeliveryByTracking(order.trackingNumber);
       
       console.log(`Checking Order ${order.orderNumber} (Tracking: ${order.trackingNumber}) -> Bosta Status: ${bostaData.statusName}, Cash Collected: ${bostaData.isMoneyCollected}`);
@@ -39,13 +57,11 @@ async function executeDailySync(isManualTrigger = false) {
       let newPaymentStatus = order.shopifyPaymentStatus;
       let newSyncStatus = order.syncStatus;
 
-      // 2. Check if Order is Delivered
+      // 3. Check if Order is Delivered
       if (bostaData.isDelivered) {
         tagsToAdd.push('Bosta: Delivered');
-        if (settings.autoFulfillDelivered && order.shopifyFulfillmentStatus !== 'fulfilled') {
-          newFulfillmentStatus = 'fulfilled';
-          needsUpdate = true;
-        }
+        newFulfillmentStatus = 'fulfilled';
+        needsUpdate = true;
       } else if (bostaData.status === 'OUT_FOR_DELIVERY') {
         tagsToAdd.push('Bosta: Out for Delivery');
       } else if (bostaData.status === 'RETURNED') {
@@ -54,21 +70,18 @@ async function executeDailySync(isManualTrigger = false) {
         needsUpdate = true;
       }
 
-      // 3. Check if Money (COD) is Collected
+      // 4. Check if Money (COD) is Collected
       let isMoneyCollected = order.isMoneyCollected;
       let moneyCollectedAmount = order.moneyCollectedAmount;
       let moneyCollectedAt = order.moneyCollectedAt;
 
-      // If Bosta returns money collected OR if we are simulating updates for uncollected delivered orders
-      if (bostaData.isMoneyCollected || (order.bostaStatus === 'DELIVERED' && order.syncStatus === 'REQUIRES_COLLECTION')) {
+      if (bostaData.isMoneyCollected || (bostaData.isDelivered && order.bostaStatus === 'DELIVERED')) {
         isMoneyCollected = true;
-        moneyCollectedAmount = bostaData.codAmount || order.codAmount;
+        moneyCollectedAmount = bostaData.codAmount || order.codAmount || 0;
         moneyCollectedAt = bostaData.moneyCollectedAt || new Date().toISOString();
         
         tagsToAdd.push('Bosta: Cash Collected');
-        if (settings.autoMarkPaid) {
-          newPaymentStatus = 'paid';
-        }
+        newPaymentStatus = 'paid';
         newSyncStatus = 'SYNCED';
         needsUpdate = true;
         moneyCollectedCount++;
@@ -79,11 +92,23 @@ async function executeDailySync(isManualTrigger = false) {
         needsUpdate = true;
       }
 
-      // 4. Perform update if status changed
+      // 5. Update Shopify Admin API directly
       if (needsUpdate || isManualTrigger || bostaData.status !== order.bostaStatus) {
         totalUpdated++;
-        
-        const updatedLocal = db.updateOrder({
+
+        // Call Shopify API to write Metafields, Tags, Notes, Paid status, and Delivered status
+        const shopifyResult = await shopifyService.updateShopifyOrder(order.id || order.shopifyOrderId, {
+          bostaStatusName: bostaData.statusName,
+          fulfillmentStatus: newFulfillmentStatus,
+          paymentStatus: newPaymentStatus,
+          tags: tagsToAdd,
+          syncStatus: newSyncStatus,
+          trackingNumber: order.trackingNumber,
+          codAmount: order.codAmount || bostaData.codAmount
+        });
+
+        // Persist update in database
+        db.updateOrder({
           ...order,
           bostaStatus: bostaData.status,
           bostaStatusName: bostaData.statusName,
@@ -92,16 +117,9 @@ async function executeDailySync(isManualTrigger = false) {
           moneyCollectedAt: moneyCollectedAt,
           shopifyFulfillmentStatus: newFulfillmentStatus,
           shopifyPaymentStatus: newPaymentStatus,
+          shopifyTags: tagsToAdd,
           syncStatus: newSyncStatus,
           lastCheckedAt: new Date().toISOString()
-        });
-
-        // Push tags and update Shopify
-        await shopifyService.updateShopifyOrder(order.id, {
-          fulfillmentStatus: newFulfillmentStatus,
-          paymentStatus: newPaymentStatus,
-          tags: tagsToAdd,
-          syncStatus: newSyncStatus
         });
 
         updatedOrdersList.push({
@@ -109,7 +127,8 @@ async function executeDailySync(isManualTrigger = false) {
           trackingNumber: order.trackingNumber,
           bostaStatus: bostaData.statusName,
           moneyCollected: isMoneyCollected,
-          amount: moneyCollectedAmount
+          amount: moneyCollectedAmount,
+          shopifyResult: shopifyResult.message
         });
       }
     } catch (err) {
@@ -117,7 +136,7 @@ async function executeDailySync(isManualTrigger = false) {
     }
   }
 
-  // 5. Update settings last sync time & write Log
+  // Update settings last sync time & write Log
   db.updateSettings({ lastSyncTime: new Date().toISOString() });
 
   const logEntry = db.addLog({
@@ -127,7 +146,7 @@ async function executeDailySync(isManualTrigger = false) {
     moneyCollectedCount: moneyCollectedCount,
     totalMoneyCollected: totalMoneyCollectedAmount,
     status: 'SUCCESS',
-    details: `Sync completed. Checked ${totalChecked} orders against Bosta API. Updated ${totalUpdated} orders. ${moneyCollectedCount} cash collections verified (Total: ${totalMoneyCollectedAmount.toFixed(2)} EGP).`
+    details: `Sync completed. Checked ${totalChecked} live orders against Bosta API. Updated ${totalUpdated} orders in Shopify Admin. ${moneyCollectedCount} cash collections verified (Total: ${totalMoneyCollectedAmount.toFixed(2)} EGP).`
   });
 
   console.log(`[Daily Sync Engine] Sync complete. Result:`, logEntry.details);
@@ -144,10 +163,9 @@ async function executeDailySync(isManualTrigger = false) {
  */
 function initScheduler() {
   const settings = db.getSettings();
-  const hour = settings.dailySyncHour || '00';
-  const minute = settings.dailySyncMinute || '00';
+  const hour = process.env.CRON_SCHEDULE_HOUR || settings.dailySyncHour || '00';
+  const minute = process.env.CRON_SCHEDULE_MINUTE || settings.dailySyncMinute || '00';
 
-  // Format standard cron string: "minute hour * * *" -> e.g. "0 0 * * *" (Midnight)
   const cronString = `${parseInt(minute, 10)} ${parseInt(hour, 10)} * * *`;
 
   if (cronTask) {

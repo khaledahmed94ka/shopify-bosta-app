@@ -3,54 +3,137 @@ const db = require('./db');
 
 /**
  * Shopify Admin API Service Engine
- * Updates Shopify Orders directly in Shopify Admin backend (Delivered status, Metafields, Tags, Notes, Paid status).
+ * Fetches live Shopify store orders and updates Shopify Admin backend (Delivered status, Metafields, Tags, Notes, Paid status).
  */
 
 /**
- * Updates Shopify Order directly in Shopify Admin via REST / GraphQL API
- * When Bosta status is DELIVERED, marks Shopify fulfillment status as Delivered/Fulfilled.
+ * Fetches live open orders directly from Shopify Admin API
+ */
+async function fetchLiveShopifyOrders() {
+  const settings = db.getSettings();
+  const storeDomain = process.env.SHOPIFY_STORE_DOMAIN || settings.shopifyStoreDomain;
+  const accessToken = process.env.SHOPIFY_ACCESS_TOKEN || settings.shopifyAccessToken;
+
+  if (!storeDomain || !accessToken || accessToken.startsWith('shpat_test_')) {
+    return null; // Fallback to local DB if no live token configured
+  }
+
+  const cleanDomain = storeDomain.replace(/^https?:\/\//, '').replace(/\/$/, '');
+  const path = '/admin/api/2026-07/orders.json?status=any&limit=100';
+
+  try {
+    const response = await makeShopifyRequest(cleanDomain, path, 'GET', accessToken, null);
+    if (!response || !response.orders) return null;
+
+    return response.orders.map(rawOrder => {
+      // Extract Bosta tracking number from fulfillments, tags, note_attributes, or metafields
+      let trackingNumber = null;
+      
+      // 1. From fulfillments
+      if (rawOrder.fulfillments && rawOrder.fulfillments.length > 0) {
+        const ful = rawOrder.fulfillments.find(f => f.tracking_number);
+        if (ful) trackingNumber = ful.tracking_number;
+      }
+
+      // 2. From Tags (e.g., "Bosta: 104928374" or "Tracking: 104928374" or 9-12 digit numeric tag)
+      if (!trackingNumber && rawOrder.tags) {
+        const tags = rawOrder.tags.split(',').map(t => t.trim());
+        for (const tag of tags) {
+          const match = tag.match(/(?:bosta|tracking|awb)[:\s]*(\d{8,14})/i) || tag.match(/^(\d{8,14})$/);
+          if (match) {
+            trackingNumber = match[1];
+            break;
+          }
+        }
+      }
+
+      // 3. From Note Attributes
+      if (!trackingNumber && rawOrder.note_attributes) {
+        const attr = rawOrder.note_attributes.find(a => /tracking|bosta|awb/i.test(a.name));
+        if (attr) trackingNumber = attr.value;
+      }
+
+      // 4. From Order Note
+      if (!trackingNumber && rawOrder.note) {
+        const noteMatch = rawOrder.note.match(/(?:tracking|bosta|awb)[:\s]*(\d{8,14})/i);
+        if (noteMatch) trackingNumber = noteMatch[1];
+      }
+
+      return {
+        id: `SHP-${rawOrder.order_number}`,
+        shopifyOrderId: `gid://shopify/Order/${rawOrder.id}`,
+        orderNumber: `#${rawOrder.order_number}`,
+        customerName: rawOrder.customer ? `${rawOrder.customer.first_name || ''} ${rawOrder.customer.last_name || ''}`.trim() : 'Customer',
+        customerPhone: rawOrder.customer ? (rawOrder.customer.phone || '') : '',
+        city: rawOrder.shipping_address ? rawOrder.shipping_address.city : '',
+        trackingNumber: trackingNumber,
+        codAmount: parseFloat(rawOrder.total_price || 0),
+        currency: rawOrder.currency || 'EGP',
+        bostaStatus: rawOrder.fulfillment_status === 'fulfilled' ? 'DELIVERED' : 'PACKAGE_RECEIVED',
+        bostaStatusName: rawOrder.fulfillment_status === 'fulfilled' ? 'Delivered' : 'Package Received',
+        isMoneyCollected: rawOrder.financial_status === 'paid',
+        moneyCollectedAmount: rawOrder.financial_status === 'paid' ? parseFloat(rawOrder.total_price || 0) : 0,
+        shopifyFulfillmentStatus: rawOrder.fulfillment_status || 'unfulfilled',
+        shopifyPaymentStatus: rawOrder.financial_status || 'pending',
+        shopifyTags: rawOrder.tags ? rawOrder.tags.split(',').map(t => t.trim()) : []
+      };
+    });
+  } catch (err) {
+    console.error('[Shopify API Error] Failed to fetch live orders from Shopify Admin:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Updates Shopify Order directly in Shopify Admin via REST API
+ * Writes Bosta Metafields, Tags, Order Notes, and Payment Status so staff view everything inside Shopify.
  */
 async function updateShopifyOrder(orderId, updates) {
   const settings = db.getSettings();
-  const storeDomain = settings.shopifyStoreDomain || process.env.SHOPIFY_STORE_DOMAIN;
-  const accessToken = settings.shopifyAccessToken || process.env.SHOPIFY_ACCESS_TOKEN;
+  const storeDomain = process.env.SHOPIFY_STORE_DOMAIN || settings.shopifyStoreDomain;
+  const accessToken = process.env.SHOPIFY_ACCESS_TOKEN || settings.shopifyAccessToken;
 
-  const localOrder = db.getOrderByIdOrTracking(orderId);
-  if (!localOrder) {
-    return { success: false, error: 'Order not found' };
-  }
+  const localOrder = db.getOrderByIdOrTracking(orderId) || {
+    id: orderId,
+    shopifyOrderId: String(orderId).includes('gid://') ? orderId : `gid://shopify/Order/${orderId}`,
+    orderNumber: String(orderId),
+    trackingNumber: updates.trackingNumber || '',
+    codAmount: updates.codAmount || 0,
+    currency: 'EGP',
+    shopifyTags: []
+  };
 
   // 1. Prepare Metafields payload for Shopify Order
   const metafields = [
-    { namespace: 'bosta', key: 'tracking_number', value: localOrder.trackingNumber, type: 'single_line_text_field' },
-    { namespace: 'bosta', key: 'tracking_url', value: `https://bosta.co/tracking-shipment?trackingNumber=${localOrder.trackingNumber}`, type: 'url' },
-    { namespace: 'bosta', key: 'delivery_status', value: updates.bostaStatusName || localOrder.bostaStatusName || 'Delivered', type: 'single_line_text_field' },
-    { namespace: 'bosta', key: 'is_delivered', value: (updates.fulfillmentStatus === 'fulfilled' || localOrder.bostaStatus === 'DELIVERED') ? 'true' : 'false', type: 'boolean' },
-    { namespace: 'bosta', key: 'cod_amount', value: `${localOrder.codAmount || 0} ${localOrder.currency || 'EGP'}`, type: 'single_line_text_field' },
-    { namespace: 'bosta', key: 'money_collected', value: localOrder.isMoneyCollected ? 'true' : 'false', type: 'boolean' },
-    { namespace: 'bosta', key: 'money_collected_at', value: localOrder.moneyCollectedAt || 'N/A', type: 'single_line_text_field' }
+    { namespace: 'bosta', key: 'tracking_number', value: String(updates.trackingNumber || localOrder.trackingNumber || ''), type: 'single_line_text_field' },
+    { namespace: 'bosta', key: 'tracking_url', value: `https://bosta.co/tracking-shipment?trackingNumber=${updates.trackingNumber || localOrder.trackingNumber || ''}`, type: 'url' },
+    { namespace: 'bosta', key: 'delivery_status', value: String(updates.bostaStatusName || 'Delivered'), type: 'single_line_text_field' },
+    { namespace: 'bosta', key: 'is_delivered', value: (updates.fulfillmentStatus === 'fulfilled') ? 'true' : 'false', type: 'boolean' },
+    { namespace: 'bosta', key: 'cod_amount', value: `${updates.codAmount || localOrder.codAmount || 0} EGP`, type: 'single_line_text_field' },
+    { namespace: 'bosta', key: 'money_collected', value: updates.paymentStatus === 'paid' ? 'true' : 'false', type: 'boolean' },
+    { namespace: 'bosta', key: 'money_collected_at', value: new Date().toISOString(), type: 'single_line_text_field' }
   ];
 
   // 2. Prepare Tags
   const newTags = [...new Set([...(localOrder.shopifyTags || []), ...(updates.tags || [])])];
-  if (localOrder.bostaStatus === 'DELIVERED' || updates.fulfillmentStatus === 'fulfilled') {
-    if (!newTags.includes('Bosta: Delivered')) newTags.push('Bosta: Delivered');
+  if (updates.fulfillmentStatus === 'fulfilled' && !newTags.includes('Bosta: Delivered')) {
+    newTags.push('Bosta: Delivered');
   }
 
   // 3. Prepare Order Note comment for Shopify Admin Staff
-  const isDelivered = localOrder.bostaStatus === 'DELIVERED' || updates.fulfillmentStatus === 'fulfilled';
-  const noteComment = `[Bosta Auto-Sync] Delivery Status: ${isDelivered ? 'DELIVERED' : (updates.bostaStatusName || localOrder.bostaStatusName)}. Bosta Tracking AWB: ${localOrder.trackingNumber}. COD Cash Collected: ${localOrder.isMoneyCollected ? 'YES (' + localOrder.moneyCollectedAmount + ' EGP)' : 'NO (Pending Transfer)'}. Last Checked: ${new Date().toLocaleString()}`;
+  const isDelivered = updates.fulfillmentStatus === 'fulfilled';
+  const noteComment = `[Bosta Auto-Sync] Delivery Status: ${isDelivered ? 'DELIVERED' : updates.bostaStatusName}. Bosta Tracking AWB: ${updates.trackingNumber || localOrder.trackingNumber}. COD Cash Collected: ${updates.paymentStatus === 'paid' ? 'YES (' + (updates.codAmount || localOrder.codAmount) + ' EGP)' : 'NO (Pending Transfer)'}. Last Checked: ${new Date().toLocaleString()}`;
 
   // If live credentials provided, execute HTTPS request to Shopify Admin API
   if (storeDomain && accessToken && !accessToken.startsWith('shpat_test_')) {
     try {
-      const cleanDomain = storeDomain.replace(/^https?:\/\//, '');
-      const cleanOrderId = localOrder.shopifyOrderId.replace('gid://shopify/Order/', '');
+      const cleanDomain = storeDomain.replace(/^https?:\/\//, '').replace(/\/$/, '');
+      const rawShopifyId = String(localOrder.shopifyOrderId || orderId).replace('gid://shopify/Order/', '').replace('SHP-', '');
       
       // Update Order Tags, Notes, Financial status, and Metafields
       const payload = {
         order: {
-          id: cleanOrderId,
+          id: rawShopifyId,
           tags: newTags.join(', '),
           note: noteComment,
           metafields: metafields
@@ -61,48 +144,35 @@ async function updateShopifyOrder(orderId, updates) {
         payload.order.financial_status = 'paid';
       }
 
-      await makeShopifyRequest(cleanDomain, `/admin/api/2026-07/orders/${cleanOrderId}.json`, 'PUT', accessToken, payload);
+      await makeShopifyRequest(cleanDomain, `/admin/api/2026-07/orders/${rawShopifyId}.json`, 'PUT', accessToken, payload);
 
       // Create/Update Fulfillment to mark order as DELIVERED in Shopify Admin
       if (isDelivered) {
         try {
           const fulfillmentPayload = {
             fulfillment: {
-              location_id: null,
-              tracking_number: localOrder.trackingNumber,
+              tracking_number: updates.trackingNumber || localOrder.trackingNumber,
               tracking_company: 'Bosta',
-              tracking_urls: [`https://bosta.co/tracking-shipment?trackingNumber=${localOrder.trackingNumber}`],
+              tracking_urls: [`https://bosta.co/tracking-shipment?trackingNumber=${updates.trackingNumber || localOrder.trackingNumber}`],
               shipment_status: 'delivered',
               notify_customer: true
             }
           };
-          await makeShopifyRequest(cleanDomain, `/admin/api/2026-07/orders/${cleanOrderId}/fulfillments.json`, 'POST', accessToken, fulfillmentPayload);
-          console.log(`[Shopify Live API] Marked Order ${localOrder.orderNumber} as DELIVERED & FULFILLED in Shopify Admin.`);
+          await makeShopifyRequest(cleanDomain, `/admin/api/2026-07/orders/${rawShopifyId}/fulfillments.json`, 'POST', accessToken, fulfillmentPayload);
+          console.log(`[Shopify Live API] Marked Order ${localOrder.orderNumber || rawShopifyId} as DELIVERED & FULFILLED in Shopify Admin.`);
         } catch (fulErr) {
-          console.warn(`[Shopify Fulfillment Note] Order ${localOrder.orderNumber} fulfillment status updated via order payload: ${fulErr.message}`);
+          console.warn(`[Shopify Fulfillment Note] Fulfillment creation response: ${fulErr.message}`);
         }
       }
     } catch (err) {
-      console.warn(`[Shopify API Warning] Could not update live Shopify API: ${err.message}. Local sync applied.`);
+      console.warn(`[Shopify API Error] Could not update live Shopify API for order ${orderId}: ${err.message}`);
     }
   }
 
-  // Update local DB representation
-  const updated = db.updateOrder({
-    ...localOrder,
-    shopifyFulfillmentStatus: isDelivered ? 'fulfilled' : (updates.fulfillmentStatus || localOrder.shopifyFulfillmentStatus),
-    shopifyPaymentStatus: updates.paymentStatus || localOrder.shopifyPaymentStatus,
-    shopifyTags: newTags,
-    shopifyMetafields: metafields,
-    shopifyNote: noteComment,
-    syncStatus: updates.syncStatus || localOrder.syncStatus,
-    lastCheckedAt: new Date().toISOString()
-  });
-
   return {
     success: true,
-    order: updated,
-    message: `Order ${localOrder.orderNumber} successfully marked as DELIVERED in Shopify Admin.`
+    metafields: metafields,
+    message: `Order ${localOrder.orderNumber || orderId} synchronized with Shopify Admin.`
   };
 }
 
@@ -111,16 +181,20 @@ async function updateShopifyOrder(orderId, updates) {
  */
 function makeShopifyRequest(domain, path, method, token, data) {
   return new Promise((resolve, reject) => {
-    const postData = JSON.stringify(data);
+    const postData = data ? JSON.stringify(data) : null;
+    const headers = {
+      'X-Shopify-Access-Token': token,
+      'Content-Type': 'application/json'
+    };
+    if (postData) {
+      headers['Content-Length'] = Buffer.byteLength(postData);
+    }
+
     const options = {
       hostname: domain,
       path: path,
       method: method,
-      headers: {
-        'X-Shopify-Access-Token': token,
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData)
-      }
+      headers: headers
     };
 
     const req = https.request(options, (res) => {
@@ -136,11 +210,12 @@ function makeShopifyRequest(domain, path, method, token, data) {
     });
 
     req.on('error', reject);
-    req.write(postData);
+    if (postData) req.write(postData);
     req.end();
   });
 }
 
 module.exports = {
+  fetchLiveShopifyOrders,
   updateShopifyOrder
 };
