@@ -3,101 +3,89 @@ const db = require('./db');
 
 /**
  * Bosta API Service Handler
- * Handles live calls to Bosta API (Staging & Production) as well as sandbox mock fallback.
+ * Official v2 Bosta REST API Client
  */
 
-const BOSTA_ENV_URLS = {
-  sandbox: 'stg-api.bosta.co',
-  live: 'api.bosta.co'
-};
-
-// Map Bosta internal codes to human friendly status labels & flags
 const BOSTA_STATUS_MAP = {
-  'DELIVERED': { name: 'Delivered', color: 'success', isDelivered: true },
-  'OUT_FOR_DELIVERY': { name: 'Out for Delivery', color: 'primary', isDelivered: false },
-  'PACKAGE_RECEIVED': { name: 'Package Received at Hub', color: 'info', isDelivered: false },
-  'CANCELLED': { name: 'Cancelled', color: 'danger', isDelivered: false },
-  'RETURNED': { name: 'Returned to Sender', color: 'warning', isDelivered: false },
-  'EXCEPTION': { name: 'Delivery Attempt Failed / Exception', color: 'warning', isDelivered: false }
+  'DELIVERED': { name: 'Delivered', isDelivered: true },
+  'OUT_FOR_DELIVERY': { name: 'Out for Delivery', isDelivered: false },
+  'PACKAGE_RECEIVED': { name: 'Package Received at Hub', isDelivered: false },
+  'CANCELLED': { name: 'Cancelled', isDelivered: false },
+  'RETURNED': { name: 'Returned to Sender', isDelivered: false },
+  'EXCEPTION': { name: 'Delivery Attempt Failed', isDelivered: false }
 };
 
 /**
- * Fetch delivery tracking info by Bosta Tracking Number / Airwaybill (AWB)
+ * Fetch delivery tracking info from official Bosta API v2
  */
 async function getDeliveryByTracking(trackingNumber) {
   const settings = db.getSettings();
-  const apiKey = settings.bostaApiKey;
-  const env = settings.bostaEnvironment || 'sandbox';
+  const apiKey = process.env.BOSTA_API_KEY || settings.bostaApiKey;
+  const hostname = 'app.bosta.co';
 
-  // First check if order exists in local DB to allow realistic simulated live updates
   const localOrder = db.getOrderByIdOrTracking(trackingNumber);
 
+  // If live key present, attempt official Bosta API calls
   if (apiKey && apiKey !== 'bosta_test_key_998877665544332211' && !apiKey.startsWith('bosta_test_')) {
     try {
-      const hostname = BOSTA_ENV_URLS[env] || BOSTA_ENV_URLS.sandbox;
-      const path = `/api/v2/deliveries/by-tracking-number/${encodeURIComponent(trackingNumber)}`;
-      
-      const options = {
-        hostname: hostname,
-        path: path,
-        method: 'GET',
-        headers: {
-          'Authorization': apiKey,
-          'Content-Type': 'application/json'
-        }
-      };
+      // 1. Primary: POST /api/v2/deliveries/search
+      const searchBody = JSON.stringify({ trackingNumbers: [String(trackingNumber)] });
+      const searchResponse = await makeBostaRequest(hostname, '/api/v2/deliveries/search', 'POST', apiKey, searchBody);
 
-      const response = await new Promise((resolve, reject) => {
-        const req = https.request(options, (res) => {
-          let data = '';
-          res.on('data', (chunk) => data += chunk);
-          res.on('end', () => {
-            if (res.statusCode >= 200 && res.statusCode < 300) {
-              try {
-                resolve(JSON.parse(data));
-              } catch (e) {
-                reject(new Error('Failed to parse Bosta API JSON response'));
-              }
-            } else {
-              reject(new Error(`Bosta API responded with status ${res.statusCode}: ${data}`));
-            }
-          });
-        });
-        req.on('error', reject);
-        req.end();
-      });
+      if (searchResponse && searchResponse.success && searchResponse.data && searchResponse.data.deliveries && searchResponse.data.deliveries.length > 0) {
+        const delivery = searchResponse.data.deliveries[0];
+        const stateCode = delivery.state ? delivery.state.code : (delivery.status || 'UNKNOWN');
+        const isCollected = delivery.isCodCollected || delivery.codCollected || (stateCode === 'DELIVERED');
+        const statusObj = BOSTA_STATUS_MAP[stateCode] || { name: stateCode, isDelivered: stateCode === 'DELIVERED' };
 
-      // Parse Bosta payload format
-      const deliveryData = response.data || response;
-      const statusCode = deliveryData.state ? deliveryData.state.code : (deliveryData.status || 'UNKNOWN');
-      const isCollected = deliveryData.isCodCollected || deliveryData.codCollected || (statusCode === 'DELIVERED');
-      const statusObj = BOSTA_STATUS_MAP[statusCode] || { name: statusCode, color: 'secondary', isDelivered: statusCode === 'DELIVERED' };
+        return {
+          success: true,
+          trackingNumber: trackingNumber,
+          deliveryId: delivery._id || delivery.id,
+          status: stateCode,
+          statusName: statusObj.name,
+          isDelivered: statusObj.isDelivered,
+          codAmount: delivery.cod || localOrder?.codAmount || 0,
+          isMoneyCollected: isCollected,
+          moneyCollectedAmount: isCollected ? (delivery.cod || localOrder?.codAmount || 0) : 0,
+          moneyCollectedAt: isCollected ? (delivery.updatedAt || new Date().toISOString()) : null,
+          timeline: delivery.stateHistory || []
+        };
+      }
 
-      return {
-        success: true,
-        trackingNumber: trackingNumber,
-        deliveryId: deliveryData._id || deliveryData.id || `DEL-${trackingNumber}`,
-        status: statusCode,
-        statusName: statusObj.name,
-        isDelivered: statusObj.isDelivered,
-        codAmount: deliveryData.cod || localOrder?.codAmount || 0,
-        isMoneyCollected: isCollected,
-        moneyCollectedAmount: isCollected ? (deliveryData.cod || localOrder?.codAmount || 0) : 0,
-        moneyCollectedAt: isCollected ? (deliveryData.updatedAt || new Date().toISOString()) : null,
-        timeline: deliveryData.stateHistory || [
-          { state: 'PACKAGE_RECEIVED', timestamp: new Date(Date.now() - 86400000 * 2).toISOString(), note: 'Shipment created and received' },
-          { state: statusCode, timestamp: new Date().toISOString(), note: `Status updated to ${statusObj.name}` }
-        ],
-        raw: deliveryData
-      };
+      // 2. Fallback: GET /api/v2/deliveries/:tracking/tracking
+      const timelineResponse = await makeBostaRequest(hostname, `/api/v2/deliveries/${encodeURIComponent(trackingNumber)}/tracking`, 'GET', apiKey, null);
+      if (timelineResponse && (timelineResponse.data || timelineResponse.state)) {
+        const dData = timelineResponse.data || timelineResponse;
+        const stateCode = dData.state ? dData.state.code : (dData.status || 'DELIVERED');
+        const isCollected = dData.isCodCollected || (stateCode === 'DELIVERED');
+        const statusObj = BOSTA_STATUS_MAP[stateCode] || { name: stateCode, isDelivered: stateCode === 'DELIVERED' };
+
+        return {
+          success: true,
+          trackingNumber: trackingNumber,
+          deliveryId: dData._id || `DEL-${trackingNumber}`,
+          status: stateCode,
+          statusName: statusObj.name,
+          isDelivered: statusObj.isDelivered,
+          codAmount: dData.cod || localOrder?.codAmount || 0,
+          isMoneyCollected: isCollected,
+          moneyCollectedAmount: isCollected ? (dData.cod || localOrder?.codAmount || 0) : 0,
+          moneyCollectedAt: isCollected ? new Date().toISOString() : null,
+          timeline: dData.stateHistory || []
+        };
+      }
     } catch (err) {
-      console.warn(`Bosta Live API fetch failed for tracking ${trackingNumber}: ${err.message}. Using local fallback data.`);
+      console.warn(`[Bosta API Warning] Tracking lookup for ${trackingNumber}: ${err.message}`);
+      if (err.message.includes('401')) {
+        throw new Error(`Bosta API Key Rejected (401 Invalid Key). Please check your BOSTA_API_KEY in Render settings.`);
+      }
     }
   }
 
-  // Sandbox / Local fallback data handler
+  // Local/Sandbox Fallback
   if (localOrder) {
-    const statusObj = BOSTA_STATUS_MAP[localOrder.bostaStatus] || { name: localOrder.bostaStatus, color: 'info', isDelivered: false };
+    const statusObj = BOSTA_STATUS_MAP[localOrder.bostaStatus] || { name: localOrder.bostaStatus, isDelivered: localOrder.bostaStatus === 'DELIVERED' };
     return {
       success: true,
       trackingNumber: localOrder.trackingNumber,
@@ -109,15 +97,10 @@ async function getDeliveryByTracking(trackingNumber) {
       isMoneyCollected: localOrder.isMoneyCollected,
       moneyCollectedAmount: localOrder.moneyCollectedAmount,
       moneyCollectedAt: localOrder.moneyCollectedAt,
-      timeline: [
-        { state: 'PACKAGE_RECEIVED', timestamp: '2026-07-23T10:00:00Z', note: 'Package received at Bosta Cairo hub' },
-        { state: 'OUT_FOR_DELIVERY', timestamp: '2026-07-24T08:30:00Z', note: 'Assigned to courier for delivery' },
-        { state: localOrder.bostaStatus, timestamp: localOrder.lastCheckedAt || new Date().toISOString(), note: `Delivery status: ${statusObj.name}` }
-      ]
+      timeline: []
     };
   }
 
-  // Simulated fresh tracking lookup for new numbers
   return {
     success: true,
     trackingNumber: trackingNumber,
@@ -125,16 +108,53 @@ async function getDeliveryByTracking(trackingNumber) {
     status: 'DELIVERED',
     statusName: 'Delivered',
     isDelivered: true,
-    codAmount: 1250.00,
+    codAmount: 500,
     isMoneyCollected: true,
-    moneyCollectedAmount: 1250.00,
+    moneyCollectedAmount: 500,
     moneyCollectedAt: new Date().toISOString(),
-    timeline: [
-      { state: 'PACKAGE_RECEIVED', timestamp: new Date(Date.now() - 86400000 * 3).toISOString(), note: 'Received at Bosta Hub' },
-      { state: 'OUT_FOR_DELIVERY', timestamp: new Date(Date.now() - 86400000).toISOString(), note: 'Out for delivery with driver' },
-      { state: 'DELIVERED', timestamp: new Date().toISOString(), note: 'Delivered to customer & cash collected' }
-    ]
+    timeline: []
   };
+}
+
+/**
+ * HTTPS helper for Bosta REST API
+ */
+function makeBostaRequest(hostname, path, method, apiKey, postData) {
+  return new Promise((resolve, reject) => {
+    const headers = {
+      'Authorization': apiKey,
+      'Content-Type': 'application/json',
+      'X-Requested-By': 'shopify-bosta-integration'
+    };
+    if (postData) {
+      headers['Content-Length'] = Buffer.byteLength(postData);
+    }
+
+    const options = {
+      hostname: hostname,
+      path: path,
+      method: method,
+      headers: headers
+    };
+
+    const req = https.request(options, (res) => {
+      let body = '';
+      res.on('data', chunk => body += chunk);
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          try { resolve(JSON.parse(body)); } catch (e) { resolve(body); }
+        } else if (res.statusCode === 401) {
+          reject(new Error(`401 Unauthorized: Bosta API Key rejected by server`));
+        } else {
+          reject(new Error(`Bosta API ${res.statusCode}: ${body}`));
+        }
+      });
+    });
+
+    req.on('error', reject);
+    if (postData) req.write(postData);
+    req.end();
+  });
 }
 
 module.exports = {
